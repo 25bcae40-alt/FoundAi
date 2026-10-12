@@ -78,7 +78,14 @@ export default function App() {
       ? await supabase.auth.signUp({ email, password })
       : await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (result.error) return notify(result.error.message);
+    if (result.error) {
+  if (result.error.status === 429) {
+    notify('Too many attempts. Please wait a few minutes before trying again.');
+  } else {
+    notify(result.error.message);
+  }
+  return;
+}
     if (authMode === 'signup') notify('Check your email to confirm your account.');
     else { setUser(result.data.user); go('dashboard'); }
   }
@@ -250,5 +257,38 @@ function AdminPage({ items, go, notify }) {
 }
 
 function Footer({ go }) {
-  return <footer className="footer"><div className="page-wrap footer-inner"><div><Brand onClick={()=>go('home')}/><p>A thoughtful way to return what matters.</p></div><div className="footer-links"><button onClick={()=>go('how')}>How it works</button><button onClick={()=>go('search')}>Browse items</button><button onClick={()=>go('admin')}>Admin demo</button></div><div className="footer-note"><ShieldCheck size={15}/> Privacy-first by design</div></div><div className="page-wrap copyright">© {new Date().getFullYear()} LostLink. AI-assisted matching; ownership requires verification.</div></footer>;
+  return <footer className="footer">
+    <div className="page-wrap footer-inner">
+      <div>
+        <Brand onClick={() => go('home')} />
+        <p>A thoughtful way to return what matters.</p>
+      </div>
+
+      <div className="footer-links">
+        <button onClick={() => go('how')}>How it works</button>
+        <button onClick={() => go('search')}>Browse items</button>
+        <button onClick={() => go('admin')}>Admin demo</button>
+      </div>
+
+      <div className="footer-note">
+        <ShieldCheck size={15} /> Privacy-first by design
+      </div>
+    </div>
+
+    <div className="page-wrap" style={{ textAlign: 'center', padding: '20px 0' }}>
+      <p style={{ marginBottom: '8px' }}>
+        Designed &amp; Developed by <strong>N. Siva</strong>
+      </p>
+      <p style={{ marginBottom: '8px' }}>
+        Project Helper: <strong>Naveen</strong>
+      </p>
+      <p style={{ fontSize: '13px', opacity: 0.7 }}>
+        BCA Students | Aspiring Software Developers
+      </p>
+    </div>
+
+    <div className="page-wrap copyright">
+      © {new Date().getFullYear()} LostLink. AI-assisted matching; ownership requires verification.
+    </div>
+  </footer>;
 }
