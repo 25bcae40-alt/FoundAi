@@ -90,34 +90,157 @@ export default function App() {
     else { setUser(result.data.user); go('dashboard'); }
   }
 
-  async function submitReport(e) {
-    e.preventDefault();
-    if (!form.name.trim() || !form.description.trim() || !form.location.trim()) return notify('Please complete the item name, description and location.');
-    if (isSupabaseConfigured && !user) { notify('Please sign in before submitting a report.'); go('auth'); return; }
-    setLoading(true);
+  async function submitReport(e, selectedPhoto = null) {
+  e.preventDefault();
+
+  if (
+    !form.name.trim() ||
+    !form.description.trim() ||
+    !form.location.trim()
+  ) {
+    return notify('Please complete the item name, description and location.');
+  }
+
+  if (isSupabaseConfigured && !user) {
+    notify('Please sign in before submitting a report.');
+    go('auth');
+    return;
+  }
+
+  setLoading(true);
+  let uploadedPath = null;
+
+  try {
     const row = {
-      kind:formKind, name:form.name.trim(), category:form.category, description:form.description.trim(),
-      location:form.location.trim(), date:form.date, color:form.color, brand:form.brand,
-      status:'open', image:formKind === 'lost' ? 'wallet' : 'bag', ownerId:user?.id || null,
-      privateMark:formKind === 'lost' ? form.privateMark : undefined,
-      privateContents:formKind === 'lost' ? form.privateContents : undefined
+      kind: formKind,
+      name: form.name.trim(),
+      category: form.category,
+      description: form.description.trim(),
+      location: form.location.trim(),
+      date: form.date,
+      color: form.color,
+      brand: form.brand,
+      status: 'open',
+      image: formKind === 'lost' ? 'wallet' : 'bag',
+      image_path: null,
+      ownerId: user?.id || null,
+      privateMark: formKind === 'lost' ? form.privateMark : undefined,
+      privateContents: formKind === 'lost' ? form.privateContents : undefined
     };
+
     if (supabase && user) {
-      const table = formKind === 'lost' ? 'lost_items' : 'found_items';
-      const { data, error } = await supabase.from(table).insert({
-        user_id:user.id, name:row.name, category:row.category, description:row.description,
-        location:row.location, item_date:row.date, color:row.color, brand:row.brand, status:'open',
-        private_mark:row.privateMark || null, private_contents:row.privateContents || null
-      }).select().single();
-      if (error) { setLoading(false); return notify(`Report not saved: ${error.message}`); }
+      if (selectedPhoto) {
+        const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+
+        if (!allowedTypes.includes(selectedPhoto.type)) {
+          throw new Error('Choose a JPG, PNG, or WebP image.');
+        }
+
+        if (selectedPhoto.size > 5 * 1024 * 1024) {
+          throw new Error('The image must be 5 MB or smaller.');
+        }
+
+        const extension = {
+          'image/jpeg': 'jpg',
+          'image/png': 'png',
+          'image/webp': 'webp'
+        }[selectedPhoto.type];
+
+        const filePath =
+          `${user.id}/${crypto.randomUUID()}.${extension}`;
+
+        const { data: uploadData, error: uploadError } =
+          await supabase.storage
+            .from('item-photos')
+            .upload(filePath, selectedPhoto, {
+              contentType: selectedPhoto.type,
+              upsert: false
+            });
+
+        if (uploadError) {
+          throw new Error(`Photo upload failed: ${uploadError.message}`);
+        }
+
+        uploadedPath = uploadData.path;
+        row.image_path = uploadedPath;
+      }
+
+      const table =
+        formKind === 'lost' ? 'lost_items' : 'found_items';
+
+      const { data, error } = await supabase
+        .from(table)
+        .insert({
+          user_id: user.id,
+          name: row.name,
+          category: row.category,
+          description: row.description,
+          location: row.location,
+          item_date: row.date || null,
+          color: row.color || null,
+          brand: row.brand || null,
+          status: 'open',
+          image_path: uploadedPath,
+          private_mark: row.privateMark || null,
+          private_contents: row.privateContents || null
+        })
+        .select()
+        .single();
+
+      if (error) {
+        throw new Error(`Report not saved: ${error.message}`);
+      }
+
       row.id = data.id;
-    } else row.id = `DEMO-${Date.now().toString().slice(-6)}`;
+    } else {
+      row.id = `DEMO-${Date.now().toString().slice(-6)}`;
+    }
+
     setItems(prev => [row, ...prev]);
-    setNotifications(prev => [{ id:Date.now(), title:`${formKind === 'lost' ? 'Lost' : 'Found'} report submitted`, detail:row.name, time:'Just now', unread:true }, ...prev]);
-    setLoading(false); setForm({ name:'', category:'Wallet', description:'', location:'', date:new Date().toISOString().slice(0,10), color:'', brand:'', privateMark:'', privateContents:'' });
+
+    setNotifications(prev => [
+      {
+        id: Date.now(),
+        title: `${formKind === 'lost' ? 'Lost' : 'Found'} report submitted`,
+        detail: row.name,
+        time: 'Just now',
+        unread: true
+      },
+      ...prev
+    ]);
+
+    setForm({
+      name: '',
+      category: 'Wallet',
+      description: '',
+      location: '',
+      date: new Date().toISOString().slice(0, 10),
+      time: '',
+      color: '',
+      brand: '',
+      privateMark: '',
+      privateContents: ''
+    });
+
     notify('Report submitted. Matching can suggest candidates, but never proves ownership.');
     go('dashboard');
+  } catch (error) {
+    // Clean up the uploaded file if the database insert failed.
+    if (uploadedPath && supabase) {
+      const { error: cleanupError } = await supabase.storage
+        .from('item-photos')
+        .remove([uploadedPath]);
+
+      if (cleanupError) {
+        console.error('Photo cleanup failed:', cleanupError.message);
+      }
+    }
+
+    notify(error.message || 'Unable to submit the report.');
+  } finally {
+    setLoading(false);
   }
+}
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();
@@ -220,12 +343,76 @@ function activeMatchesCount(items) { return items.filter(i=>i.kind==='match').le
 function Stat({ icon:Icon, label, value, tint }) { return <div className="stat-card"><span className={`stat-icon tint-${tint}`}><Icon size={19}/></span><div><span>{label}</span><b>{value}</b></div></div>; }
 
 function ReportPage({ kind, setKind, form, setForm, submitReport, loading, go }) {
+  const [photo, setPhoto] = useState(null);
+const [photoPreview, setPhotoPreview] = useState('');
   const update = (e) => setForm(prev=>({...prev,[e.target.name]:e.target.value}));
   return <section className="page-wrap page-content narrow-content"><button className="back-link" onClick={()=>go('dashboard')}>← Back to dashboard</button><div className="page-title-row"><div><p className="eyebrow">COMMUNITY REPORT</p><h1>Report an item</h1><p className="muted">Help LostLink connect the right item with the right person.</p></div></div>
     <div className="segmented"><button className={kind==='lost'?'selected':''} onClick={()=>setKind('lost')} type="button"><Search size={16}/> I lost an item</button><button className={kind==='found'?'selected':''} onClick={()=>setKind('found')} type="button"><HeartHandshake size={16}/> I found an item</button></div>
-    <form className="panel report-form" onSubmit={submitReport}><div className="form-section"><h2>Item details</h2><p>Share enough detail to help identify the item, but keep unique identifying facts private.</p><div className="form-grid"><label>Item name *<input name="name" value={form.name} onChange={update} placeholder="e.g. Black leather wallet" required maxLength="100"/></label><label>Category *<select name="category" value={form.category} onChange={update}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><label>Color<input name="color" value={form.color} onChange={update} placeholder="e.g. Black"/></label><label>Brand (optional)<input name="brand" value={form.brand} onChange={update} placeholder="e.g. Samsung"/></label><label className="full-field">General description *<textarea name="description" value={form.description} onChange={update} placeholder="Describe visible features. Do not include secret ownership details." rows="4" required maxLength="1000"/></label></div></div>
+    <form
+  className="panel report-form"
+  onSubmit={(e) => submitReport(e, photo)}
+>
+  <div className="form-section"><h2>Item details</h2><p>Share enough detail to help identify the item, but keep unique identifying facts private.</p><div className="form-grid"><label>Item name *<input name="name" value={form.name} onChange={update} placeholder="e.g. Black leather wallet" required maxLength="100"/></label><label>Category *<select name="category" value={form.category} onChange={update}>{categories.map(c=><option key={c}>{c}</option>)}</select></label><label>Color<input name="color" value={form.color} onChange={update} placeholder="e.g. Black"/></label><label>Brand (optional)<input name="brand" value={form.brand} onChange={update} placeholder="e.g. Samsung"/></label><label className="full-field">General description *<textarea name="description" value={form.description} onChange={update} placeholder="Describe visible features. Do not include secret ownership details." rows="4" required maxLength="1000"/></label></div></div>
     <div className="form-section"><h2>When & where</h2><div className="form-grid"><label>Date {kind==='lost'?'lost':'found'} *<input type="date" name="date" value={form.date} onChange={update} required/></label><label>Approximate time<input type="time" name="time" value={form.time||''} onChange={update}/></label><label className="full-field">Location *<input name="location" value={form.location} onChange={update} placeholder="e.g. Library, Building A" required maxLength="200"/></label></div></div>
-    <div className="upload-box"><Upload size={22}/><b>Photo upload</b><p>Image uploads are not enabled in this starter yet. Configure Supabase Storage to add secure uploads.</p></div>
+       <div className="upload-box">
+      <Upload size={22} />
+      <b>Upload item photo (optional)</b>
+      <p>Choose a JPG, PNG, or WebP image up to 5 MB.</p>
+
+      <input
+        type="file"
+        accept="image/jpeg,image/png,image/webp"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (!file) return;
+
+          if (file.size > 5 * 1024 * 1024) {
+            alert('Please choose an image smaller than 5 MB.');
+            e.target.value = '';
+            setPhoto(null);
+            setPhotoPreview('');
+            return;
+          }
+
+          if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+            alert('Please choose a JPG, PNG, or WebP image.');
+            e.target.value = '';
+            setPhoto(null);
+            setPhotoPreview('');
+            return;
+          }
+
+          setPhoto(file);
+          setPhotoPreview(URL.createObjectURL(file));
+        }}
+      />
+
+      {photoPreview && (
+        <div className="photo-preview">
+          <img
+            src={photoPreview}
+            alt="Selected item preview"
+            style={{
+              maxWidth: '220px',
+              maxHeight: '180px',
+              objectFit: 'contain',
+              marginTop: '12px',
+              borderRadius: '8px'
+            }}
+          />
+          <p>{photo?.name}</p>
+          <button
+            type="button"
+            onClick={() => {
+              setPhoto(null);
+              setPhotoPreview('');
+            }}
+          >
+            Remove photo
+          </button>
+        </div>
+      )}
+    </div>
     {kind==='lost'&&<div className="private-box"><div className="private-title"><LockKeyhole size={19}/><div><h3>Private ownership details</h3><p>These details must never appear in public search results.</p></div></div><div className="form-grid"><label>Unique mark (optional)<input name="privateMark" value={form.privateMark} onChange={update} placeholder="A scratch, sticker or hidden mark" maxLength="300"/></label><label>Specific contents (optional)<input name="privateContents" value={form.privateContents} onChange={update} placeholder="A non-public item inside" maxLength="300"/></label></div><p className="privacy-note"><ShieldCheck size={15}/> Private details in this starter are demo-only unless the protected schema and server-side verification are configured.</p></div>}
     <label className="checkbox-line"><input type="checkbox" required/> I confirm the information is accurate and understand that matching does not prove ownership.</label><div className="form-actions"><Button variant="outline" onClick={()=>go('home')}>Cancel</Button><Button type="submit" disabled={loading}>{loading?'Submitting…':'Submit report'} <ArrowRight size={16}/></Button></div></form>
   </section>;
